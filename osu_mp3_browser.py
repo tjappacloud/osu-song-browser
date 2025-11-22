@@ -5,6 +5,7 @@ from pathlib import Path
 import pygame
 import sys
 import re
+import time
 
 # try to import Pillow for image thumbnails
 try:
@@ -125,8 +126,29 @@ class OsuMP3Browser(tk.Tk):
         now_frame.pack(fill=tk.X, padx=8, pady=(0, 4))
         self.now_image_label = ttk.Label(now_frame)
         self.now_image_label.pack(side=tk.LEFT, padx=(0, 8))
-        self.now_title_label = ttk.Label(now_frame, text="Now: Not playing")
-        self.now_title_label.pack(side=tk.LEFT, anchor=tk.CENTER)
+        now_right = ttk.Frame(now_frame)
+        now_right.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.now_title_label = ttk.Label(now_right, text="Now: Not playing")
+        self.now_title_label.pack(anchor=tk.W)
+        # progress bar and time label
+        # use a finer-grained internal scale (0-1000) for smoother progress updates
+        self.progress = ttk.Progressbar(now_right, orient=tk.HORIZONTAL, mode='determinate', length=400, maximum=1000)
+        self.progress.pack(fill=tk.X, pady=(4, 0))
+        self.time_label = ttk.Label(now_right, text="0:00 / 0:00")
+        self.time_label.pack(anchor=tk.W)
+        # playback tracking
+        self._playing_path = None
+        self._progress_after_id = None
+        # manual timing for smoother progress and seeking
+        self._start_time = None
+        self._pause_time = None
+        self._paused_offset = 0.0
+        # bind progress seeking events
+        try:
+            self.progress.bind('<Button-1>', self.on_progress_click)
+            self.progress.bind('<B1-Motion>', self.on_progress_click)
+        except Exception:
+            pass
 
         self.play_btn = ttk.Button(bottom, text="Play", command=self.play_selected)
         self.play_btn.pack(side=tk.LEFT)
@@ -212,6 +234,28 @@ class OsuMP3Browser(tk.Tk):
             self.current_label.config(text=f"Playing: {folder_title}")
             # Update now-playing display (thumbnail + title)
             self.now_title_label.config(text=f"Now: {folder_title}")
+            # start updating progress
+            self._playing_path = path
+            # Initialize manual timing base so progress/time are consistent
+            try:
+                self._start_time = time.time()
+            except Exception:
+                self._start_time = None
+            self._pause_time = None
+            self._paused_offset = 0.0
+            # cancel previous updater if any
+            if self._progress_after_id:
+                try:
+                    self.after_cancel(self._progress_after_id)
+                except Exception:
+                    pass
+                self._progress_after_id = None
+            # ensure pause button shows correct action when starting playback
+            try:
+                self.pause_btn.config(text="Pause")
+            except Exception:
+                pass
+            self.update_progress()
             # load background thumbnail if available
             bg = get_osu_background(path.parent)
             if bg and HAS_PIL:
@@ -246,24 +290,96 @@ class OsuMP3Browser(tk.Tk):
     def toggle_pause(self):
         if not pygame.mixer.get_init():
             return
-        if pygame.mixer.music.get_busy():
-            if not self.paused:
+        # If nothing is playing, do nothing
+        if not self._playing_path:
+            return
+
+        # Toggle paused state. Do not rely on pygame.mixer.music.get_busy()
+        # because some backends may report False while paused.
+        if not self.paused:
+            # Try to pause via pygame; if it fails, we still set the manual pause time
+            try:
                 pygame.mixer.music.pause()
-                self.paused = True
-                self.pause_btn.config(text="Resume")
-                self.current_label.config(text=self.current_label.cget("text") + " (paused)")
-            else:
+            except Exception:
+                pass
+            self.paused = True
+            self.pause_btn.config(text="Resume")
+            self.current_label.config(text=self.current_label.cget("text") + " (paused)")
+            # record pause time for manual timing calculations
+            try:
+                self._pause_time = time.time()
+            except Exception:
+                self._pause_time = None
+        else:
+            # Attempt to unpause; if unpause isn't supported by backend, fall back
+            # to restarting playback at the manual paused offset.
+            unpaused = False
+            try:
                 pygame.mixer.music.unpause()
-                self.paused = False
-                self.pause_btn.config(text="Pause")
-                # remove (paused) suffix
-                txt = self.current_label.cget("text").replace(" (paused)", "")
-                self.current_label.config(text=txt)
+                unpaused = True
+            except Exception:
+                unpaused = False
+
+            if not unpaused:
+                # compute paused position from manual timer
+                pos_sec = 0
+                try:
+                    if self._start_time is not None and self._pause_time is not None:
+                        pos_sec = int(self._pause_time - self._start_time)
+                except Exception:
+                    pos_sec = 0
+                try:
+                    # seek_to will attempt best-effort methods to resume at pos_sec
+                    self.seek_to(pos_sec)
+                except Exception:
+                    try:
+                        # as final fallback, just play from start
+                        pygame.mixer.music.play()
+                    except Exception:
+                        pass
+
+            self.paused = False
+            self.pause_btn.config(text="Pause")
+            # remove (paused) suffix
+            txt = self.current_label.cget("text").replace(" (paused)", "")
+            self.current_label.config(text=txt)
+            # adjust manual timing to account for pause duration
+            try:
+                if self._pause_time and self._start_time:
+                    paused_duration = time.time() - self._pause_time
+                    self._start_time += paused_duration
+            except Exception:
+                pass
+            self._pause_time = None
 
     def stop(self):
         if pygame.mixer.get_init():
             pygame.mixer.music.stop()
         self.current_label.config(text="Not playing")
+        # clear now-playing and cancel progress updates
+        self._playing_path = None
+        # clear manual timing
+        self._start_time = None
+        self._pause_time = None
+        self._paused_offset = 0.0
+        # reset pause button state
+        try:
+            self.pause_btn.config(text="Pause")
+        except Exception:
+            pass
+        self.paused = False
+        if self._progress_after_id:
+            try:
+                self.after_cancel(self._progress_after_id)
+            except Exception:
+                pass
+            self._progress_after_id = None
+        self.now_title_label.config(text="Now: Not playing")
+        self.now_image_label.config(image='')
+        if hasattr(self.now_image_label, '_photo_ref'):
+            delattr(self.now_image_label, '_photo_ref')
+        self.progress['value'] = 0
+        self.time_label.config(text="0:00 / 0:00")
 
     def toggle_fullscreen(self, event=None):
         try:
@@ -334,6 +450,70 @@ class OsuMP3Browser(tk.Tk):
         self.search_var.set('')
         self.refresh_list()
 
+    def update_progress(self):
+        """Poll playback position and update the progress bar and time label."""
+        try:
+            path = self._playing_path
+            if not path or not pygame.mixer.get_init():
+                return
+
+            total = self._metadata.get(str(path), {}).get('duration') or 0
+            # if duration unknown, try to compute and cache it
+            if not total:
+                total = self.ensure_duration(path)
+
+            # Prefer manual timing base (self._start_time) for progress display so
+            # clicking and seeking doesn't cause the UI to snap to 0 due to
+            # backend get_pos() resets. Fall back to pygame.get_pos() if manual
+            # timing isn't available.
+            busy = pygame.mixer.music.get_busy()
+            if not busy and not self.paused:
+                # mark complete
+                if total:
+                    self.progress['value'] = 1000
+                    self.time_label.config(text=f"{format_duration(total)} / {format_duration(total)}")
+                # cancel further updates
+                self._playing_path = None
+                return
+
+            # Compute position using manual base when possible
+            pos_sec = 0
+            try:
+                if self._start_time is not None:
+                    if self.paused and self._pause_time is not None:
+                        pos_sec = int(self._pause_time - self._start_time)
+                    elif not self.paused:
+                        pos_sec = int(time.time() - self._start_time)
+                    else:
+                        pos_sec = 0
+                else:
+                    pos_ms = pygame.mixer.music.get_pos()
+                    if pos_ms is None or pos_ms < 0:
+                        pos_sec = 0
+                    else:
+                        pos_sec = int(pos_ms / 1000)
+            except Exception:
+                # fallback to pygame get_pos
+                try:
+                    pos_ms = pygame.mixer.music.get_pos()
+                    pos_sec = int(pos_ms / 1000) if pos_ms and pos_ms >= 0 else 0
+                except Exception:
+                    pos_sec = 0
+
+            if total:
+                frac = min(1.0, pos_sec / total)
+                self.progress['value'] = int(frac * 1000)
+                self.time_label.config(text=f"{format_duration(pos_sec)} / {format_duration(total)}")
+            else:
+                # unknown total
+                self.progress['value'] = 0
+                self.time_label.config(text=f"{format_duration(pos_sec)} / 0:00")
+
+            # schedule next poll
+            self._progress_after_id = self.after(500, self.update_progress)
+        except Exception:
+            self._progress_after_id = None
+
     def refresh_list(self):
         """Refresh visible listbox entries based on `self.search_var`.
         Matches against folder title, cached tag title, and artist (case-insensitive substring).
@@ -358,6 +538,124 @@ class OsuMP3Browser(tk.Tk):
             if match:
                 self.mp3_paths.append((path, folder_title))
                 self.listbox.insert(tk.END, folder_title)
+
+    def on_progress_click(self, event):
+        """Handle click/drag on the progress bar to seek."""
+        try:
+            widget = event.widget
+            w = widget.winfo_width()
+            if w <= 0:
+                return
+            x = event.x
+            frac = max(0.0, min(1.0, x / w))
+            # compute target seconds
+            if not self._playing_path:
+                return
+            total = self._metadata.get(str(self._playing_path), {}).get('duration') or self.ensure_duration(self._playing_path)
+            if not total:
+                return
+            target = frac * total
+            self.seek_to(target)
+        except Exception:
+            pass
+
+    def seek_to(self, pos_sec: float):
+        """Seek to pos_sec (seconds) in the currently playing file."""
+        if not self._playing_path:
+            return
+        # clamp
+        total = self._metadata.get(str(self._playing_path), {}).get('duration') or self.ensure_duration(self._playing_path)
+        if total and pos_sec > total:
+            pos_sec = total
+        try:
+            # Attempt several seek methods in order for best compatibility.
+            # 1) pygame.mixer.music.set_pos(pos) then play() — works on some backends.
+            # 2) pygame.mixer.music.play(0, pos) — many versions support start parameter for MP3.
+            # 3) fallback: restart playback from beginning.
+            success = False
+            try:
+                pygame.mixer.music.stop()
+            except Exception:
+                pass
+
+            # Try set_pos first
+            try:
+                pygame.mixer.music.set_pos(float(pos_sec))
+                pygame.mixer.music.play()
+                success = True
+            except Exception:
+                success = False
+
+            if not success:
+                try:
+                    # try play with start position (some backends accept float)
+                    pygame.mixer.music.play(0, float(pos_sec))
+                    success = True
+                except TypeError:
+                    try:
+                        pygame.mixer.music.play(0, pos_sec)
+                        success = True
+                    except Exception:
+                        success = False
+                except Exception:
+                    success = False
+
+            if not success:
+                # final fallback: just play from start
+                try:
+                    pygame.mixer.music.play()
+                except Exception:
+                    pass
+            # update manual timing regardless of which method succeeded
+            self._start_time = time.time() - float(pos_sec)
+            self._pause_time = None
+            self._paused_offset = 0.0
+            self.paused = False
+            # restart progress polling
+            if self._progress_after_id:
+                try:
+                    self.after_cancel(self._progress_after_id)
+                except Exception:
+                    pass
+            self.update_progress()
+        except Exception:
+            pass
+
+    def ensure_duration(self, path: Path) -> int:
+        """Ensure we have a cached duration (seconds) for `path`. Tries Mutagen then pygame.mixer.Sound.
+        Returns duration in seconds (int) or 0 if unknown.
+        """
+        key = str(path)
+        meta = self._metadata.get(key, {})
+        dur = meta.get('duration') or 0
+        if dur:
+            return dur
+
+        # Try mutagen first
+        if HAS_MUTAGEN and MutagenFile is not None:
+            try:
+                audio = MutagenFile(key)
+                if audio and getattr(audio, 'info', None):
+                    length = int(getattr(audio.info, 'length', 0) or 0)
+                    if length:
+                        meta['duration'] = length
+                        self._metadata[key] = meta
+                        return length
+            except Exception:
+                pass
+
+        # Fall back to pygame.mixer.Sound (may use more memory)
+        try:
+            snd = pygame.mixer.Sound(key)
+            length = int(snd.get_length() or 0)
+            if length:
+                meta['duration'] = length
+                self._metadata[key] = meta
+                return length
+        except Exception:
+            pass
+
+        return 0
 
 
 def os_walk(path: Path):
