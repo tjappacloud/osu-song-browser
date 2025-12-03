@@ -90,6 +90,9 @@ class OsuMP3Browser(tk.Tk):
         # Manual scan button for debugging/refresh
         scan_btn = ttk.Button(top, text="Scan Now", command=lambda: threading.Thread(target=self.scan_and_populate, daemon=True).start())
         scan_btn.pack(side=tk.RIGHT, padx=(6, 0))
+        # Clear thumbnail cache action
+        clear_thumbs_btn = ttk.Button(top, text="Clear Thumbs", command=self._clear_thumbnail_cache)
+        clear_thumbs_btn.pack(side=tk.RIGHT, padx=(6, 0))
         # Dark mode toggle
         try:
             self.dark_check = ttk.Checkbutton(top, text="Dark Mode", variable=self.dark_mode_var, command=self._on_theme_changed)
@@ -112,6 +115,11 @@ class OsuMP3Browser(tk.Tk):
         clear_btn = ttk.Button(search_frame, text="Clear", command=self._clear_search)
         clear_btn.pack(side=tk.LEFT, padx=6)
 
+        # Debug controls for thumbnail sourcing (disabled by default)
+        self._debug_thumbnails = False
+        self._debug_thumb_print_limit = 10
+        self._debug_thumb_print_count = 0
+
         mid = ttk.Frame(self)
         mid.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
 
@@ -122,32 +130,46 @@ class OsuMP3Browser(tk.Tk):
         list_container = ttk.Frame(left)
         list_container.pack(fill=tk.BOTH, expand=True)
 
-        # listbox inside container using grid so hscroll sits under list and vscroll to right
-        self.listbox = tk.Listbox(list_container, activestyle='none', exportselection=False)
-        self.listbox.grid(row=0, column=0, sticky='nsew')
-        self.listbox.bind('<Double-1>', self.on_double_click)
-        self.listbox.bind('<<ListboxSelect>>', self.on_select)
+        # Treeview with images for songs inside container using grid
+        self.song_view = ttk.Treeview(list_container, show='tree')
+        try:
+            # Ensure column #0 (tree column) has room for larger image + text
+            self.song_view.column('#0', width=880, stretch=True)
+        except Exception:
+            pass
+        self.song_view.grid(row=0, column=0, sticky='nsew')
+        self.song_view.bind('<Double-1>', self.on_double_click)
+        self.song_view.bind('<<TreeviewSelect>>', self.on_select)
+        # Create a default fallback icon so images are always visible
+        try:
+            # larger fallback icon to match bigger thumbnails
+            self._thumb_size = (96, 96)
+            icon = tk.PhotoImage(master=self.song_view, width=self._thumb_size[0], height=self._thumb_size[1])
+            icon.put("#666666", to=(0,0,self._thumb_size[0],self._thumb_size[1]))
+            self._default_item_icon = icon
+        except Exception:
+            self._default_item_icon = None
         # Right-click context menu for adding to playlist
         try:
-            self.listbox.bind('<Button-3>', self._on_song_right_click)
+            self.song_view.bind('<Button-3>', self._on_song_right_click)
         except Exception:
             pass
 
         # vertical scrollbar
         try:
-            scrollbar = ttk.Scrollbar(list_container, orient=tk.VERTICAL, command=self.listbox.yview)
+            scrollbar = ttk.Scrollbar(list_container, orient=tk.VERTICAL, command=self.song_view.yview)
         except Exception:
-            scrollbar = tk.Scrollbar(list_container, orient=tk.VERTICAL, command=self.listbox.yview)
+            scrollbar = tk.Scrollbar(list_container, orient=tk.VERTICAL, command=self.song_view.yview)
         scrollbar.grid(row=0, column=1, sticky='ns')
-        self.listbox.config(yscrollcommand=scrollbar.set)
+        self.song_view.config(yscrollcommand=scrollbar.set)
 
         # horizontal scrollbar beneath
         try:
-            self.hscroll = ttk.Scrollbar(list_container, orient=tk.HORIZONTAL, command=self.listbox.xview)
+            self.hscroll = ttk.Scrollbar(list_container, orient=tk.HORIZONTAL, command=self.song_view.xview)
         except Exception:
-            self.hscroll = tk.Scrollbar(list_container, orient=tk.HORIZONTAL, command=self.listbox.xview)
+            self.hscroll = tk.Scrollbar(list_container, orient=tk.HORIZONTAL, command=self.song_view.xview)
         self.hscroll.grid(row=1, column=0, columnspan=2, sticky='ew')
-        self.listbox.config(xscrollcommand=self.hscroll.set)
+        self.song_view.config(xscrollcommand=self.hscroll.set)
 
         # Make grid expand
         try:
@@ -161,8 +183,16 @@ class OsuMP3Browser(tk.Tk):
         self._tooltip_after_id = None
         self._last_tooltip_index = None
         self._tooltip_delay_ms = 400
-        self.listbox.bind('<Motion>', self._on_listbox_motion)
-        self.listbox.bind('<Leave>', self._hide_title_tooltip)
+        self.song_view.bind('<Motion>', self._on_listbox_motion)
+        self.song_view.bind('<Leave>', self._hide_title_tooltip)
+        # Reduce hover work during scrolls
+        self._suppress_tooltips_until = 0.0
+        try:
+            self.song_view.bind('<MouseWheel>', self._on_mouse_wheel)
+        except Exception:
+            pass
+        # Map visible items to their Treeview iids for quick updates
+        self._item_iids = {}
 
         right = ttk.Frame(mid, width=480)
         right.pack(side=tk.RIGHT, fill=tk.Y)
@@ -210,8 +240,9 @@ class OsuMP3Browser(tk.Tk):
         self.time_label.pack(anchor=tk.W)
         # Prepare fixed-size placeholder images to prevent layout shifts when images change
         try:
-            self._now_img_size = (120, 80)
-            self._meta_img_size = (220, 140)
+            # enlarge previews to be more visible
+            self._now_img_size = (160, 106)
+            self._meta_img_size = (280, 178)
             # Create placeholders using PIL when available, else Tk PhotoImage
             def _mk_placeholder(size):
                 w, h = size
@@ -314,6 +345,17 @@ class OsuMP3Browser(tk.Tk):
             self.cache_path = Path.home() / CACHE_FILENAME
         except Exception:
             self.cache_path = Path(CACHE_FILENAME)
+
+        # persistent thumbnails directory (for faster subsequent startups)
+        try:
+            base_dir = Path.home()
+        except Exception:
+            base_dir = Path('.')
+        try:
+            self._thumbs_dir = base_dir / ".osu_song_browser_thumbs"
+            self._thumbs_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            self._thumbs_dir = None
 
         # Playlists store
         try:
@@ -495,10 +537,13 @@ class OsuMP3Browser(tk.Tk):
 
     def _get_selected_song_path(self):
         try:
-            sel = self.listbox.curselection()
+            sel = self.song_view.selection()
             if not sel:
                 return None
-            idx = sel[0]
+            try:
+                idx = int(self.song_view.index(sel[0]))
+            except Exception:
+                return None
             path, _title = self.mp3_paths[idx]
             return str(path)
         except Exception:
@@ -967,16 +1012,18 @@ class OsuMP3Browser(tk.Tk):
     def _on_song_right_click(self, event):
         try:
             # Select the row under mouse
-            index = self.listbox.nearest(event.y)
-            if index is not None:
+            iid = self.song_view.identify_row(event.y)
+            if iid:
                 try:
-                    self.listbox.selection_clear(0, tk.END)
+                    self.song_view.selection_set(iid)
+                    self.song_view.focus(iid)
                 except Exception:
                     pass
-                self.listbox.selection_set(index)
-                self.listbox.activate(index)
-                # Track hover index for adding via context menu
-                self._last_hover_index = index
+                try:
+                    index = int(self.song_view.index(iid))
+                    self._last_hover_index = index
+                except Exception:
+                    self._last_hover_index = None
             # Show the menu
             try:
                 self.song_menu.tk_popup(event.x_root, event.y_root)
@@ -990,10 +1037,13 @@ class OsuMP3Browser(tk.Tk):
             idx = getattr(self, '_last_hover_index', None)
             if idx is None:
                 # fallback to current selection
-                sel = self.listbox.curselection()
-                if not sel:
+                try:
+                    sel = self.song_view.selection()
+                    if not sel:
+                        return
+                    idx = int(self.song_view.index(sel[0]))
+                except Exception:
                     return
-                idx = sel[0]
             path, _title = self.mp3_paths[idx]
             if self.playlists:
                 self.playlists.add_track(playlist_name, str(path))
@@ -1004,7 +1054,8 @@ class OsuMP3Browser(tk.Tk):
     def _begin_scan_ui(self):
         # Clear current visible lists and show scanning state (must run on main thread)
         try:
-            self.listbox.delete(0, tk.END)
+            for iid in self.song_view.get_children(''):
+                self.song_view.delete(iid)
         except Exception:
             pass
         try:
@@ -1024,12 +1075,22 @@ class OsuMP3Browser(tk.Tk):
     def _apply_cache_to_ui(self):
         """Populate the visible list from the loaded cache quickly (main thread)."""
         try:
+            if getattr(self, '_debug_thumbnails', False):
+                try:
+                    print("[thumb] apply_cache_to_ui start", flush=True)
+                except Exception:
+                    pass
+            # ensure in-memory cache exists
+            if HAS_PIL and Image and ImageTk and not hasattr(self, '_thumb_cache'):
+                self._thumb_cache = {}
             # Clear current visible lists
             try:
-                self.listbox.delete(0, tk.END)
+                for iid in self.song_view.get_children(''):
+                    self.song_view.delete(iid)
             except Exception:
                 pass
             self.mp3_paths.clear()
+            loaded_from_disk = 0
             for path, folder_title in self.all_mp3_paths:
                 # populate seen set from cache so future scans don't duplicate
                 try:
@@ -1045,9 +1106,57 @@ class OsuMP3Browser(tk.Tk):
                         continue
                 self.mp3_paths.append((path, folder_title))
                 try:
-                    self.listbox.insert(tk.END, folder_title)
+                    # Attach cached thumbnail if available; otherwise use default icon.
+                    img_ref = None
+                    if HAS_PIL and Image and ImageTk and hasattr(self, '_thumb_cache'):
+                        img_ref = self._thumb_cache.get(str(path))
+                        if img_ref is None:
+                            # try load from disk cache
+                            try:
+                                img_ref = self._load_thumb_from_disk(path)
+                                if img_ref is not None:
+                                    self._thumb_cache[str(path)] = img_ref
+                                    loaded_from_disk += 1
+                                
+                            except Exception:
+                                img_ref = None
+                    icon = getattr(self, '_default_item_icon', None)
+                    # For debug: print path info for first N items
+                    if getattr(self, '_debug_thumbnails', False) and self._debug_thumb_print_count < self._debug_thumb_print_limit:
+                        try:
+                            bg = get_osu_background(path.parent)
+                            if not bg:
+                                for p in sorted(path.parent.iterdir()):
+                                    if p.suffix.lower() in {'.jpg', '.jpeg', '.png', '.bmp', '.gif'}:
+                                        bg = p
+                                        break
+                            if bg is not None:
+                                print(f"[thumb-path] using(cache)={bg}", flush=True)
+                            else:
+                                print(f"[thumb-path] no-image(cache) for {path.parent}", flush=True)
+                            self._debug_thumb_print_count += 1
+                        except Exception:
+                            pass
+                    iid = None
+                    if img_ref is not None:
+                        iid = self.song_view.insert('', 'end', text=folder_title, image=img_ref)
+                    elif icon is not None:
+                        iid = self.song_view.insert('', 'end', text=folder_title, image=icon)
+                    else:
+                        iid = self.song_view.insert('', 'end', text=folder_title)
+                    # Track iid for asynchronous thumbnail generation
+                    self._item_iids[str(path)] = iid
                 except Exception:
-                    pass
+                    try:
+                        icon = getattr(self, '_default_item_icon', None)
+                        iid = None
+                        if icon is not None:
+                            iid = self.song_view.insert('', 'end', text=folder_title, image=icon)
+                        else:
+                            iid = self.song_view.insert('', 'end', text=folder_title)
+                        self._item_iids[str(path)] = iid
+                    except Exception:
+                        pass
             try:
                 self.current_label.config(text=f"Found {len(self.all_mp3_paths)} audio files (cached)")
             except Exception:
@@ -1057,6 +1166,111 @@ class OsuMP3Browser(tk.Tk):
                 if self.mode_btn and self.play_mode:
                     mode_text = self.play_mode.capitalize()
                     self.mode_btn.config(text=f"Mode: {mode_text}")
+            except Exception:
+                pass
+            # Kick off lightweight async thumbnail generation to avoid blocking startup
+            try:
+                self.after(400, self._generate_thumbnails_async)
+            except Exception:
+                pass
+            # print summary of disk-loaded thumbs
+            try:
+                if loaded_from_disk:
+                    print(f"Thumbnails loaded from disk: {loaded_from_disk}")
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _thumb_path_for(self, path: Path):
+        try:
+            if self._thumbs_dir is None:
+                return None
+            key = str(path)
+            # create a stable filename using a simple hash
+            import hashlib
+            h = hashlib.sha1(key.encode('utf-8', errors='ignore')).hexdigest()
+            return self._thumbs_dir / f"{h}.png"
+        except Exception:
+            return None
+
+    def _load_thumb_from_disk(self, path: Path):
+        try:
+            if not (HAS_PIL and Image and ImageTk):
+                return None
+            p = self._thumb_path_for(path)
+            if p is None or not p.exists():
+                return None
+            im = Image.open(p)
+            try:
+                img_ref = ImageTk.PhotoImage(im, master=self.song_view)
+            except Exception:
+                img_ref = ImageTk.PhotoImage(im)
+            return img_ref
+        except Exception:
+            return None
+
+    def _clear_thumbnail_cache(self):
+        try:
+            # delete on-disk thumbnails
+            count = 0
+            if self._thumbs_dir and self._thumbs_dir.exists():
+                for p in list(self._thumbs_dir.glob('*.png')):
+                    try:
+                        p.unlink(missing_ok=True)
+                        count += 1
+                    except Exception:
+                        pass
+            # clear in-memory cache
+            try:
+                if hasattr(self, '_thumb_cache'):
+                    self._thumb_cache.clear()
+            except Exception:
+                pass
+            # reset Treeview images to default icon to reflect cleared cache
+            try:
+                icon = getattr(self, '_default_item_icon', None)
+                for path, _title in self.mp3_paths:
+                    iid = self._item_iids.get(str(path))
+                    if iid:
+                        if icon is not None:
+                            self.song_view.item(iid, image=icon)
+                        else:
+                            # remove image by re-setting text only
+                            self.song_view.item(iid, image='')
+                # Optionally trigger async regeneration later
+                self.after(400, self._generate_thumbnails_async)
+            except Exception:
+                pass
+            try:
+                messagebox.showinfo("Cache", f"Cleared {count} thumbnails.")
+            except Exception:
+                pass
+        except Exception:
+            try:
+                messagebox.showerror("Cache", "Failed to clear thumbnail cache.")
+            except Exception:
+                pass
+
+    def _save_thumb_to_disk(self, path: Path, image_obj):
+        try:
+            # image_obj can be a PIL Image (preferred). If it's a PhotoImage, skip.
+            if not HAS_PIL or Image is None:
+                return
+            out = self._thumb_path_for(path)
+            if out is None:
+                return
+            # Only save if not already present
+            if out.exists():
+                return
+            try:
+                # Ensure parent exists
+                out.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            # Save as PNG
+            try:
+                image_obj.save(out, format='PNG')
             except Exception:
                 pass
         except Exception:
@@ -1133,6 +1347,23 @@ class OsuMP3Browser(tk.Tk):
             except Exception:
                 pass
 
+            # Increase default font size globally (+2pt) to make text more visible
+            try:
+                if tkfont is not None:
+                    df = tkfont.nametofont('TkDefaultFont')
+                    cur_size = int(df.cget('size'))
+                    df.configure(size=cur_size + 2)
+                    # also update specialized fonts if present
+                    for name in ['TkTextFont', 'TkHeadingFont', 'TkTooltipFont']:
+                        try:
+                            f = tkfont.nametofont(name)
+                            sz = int(f.cget('size'))
+                            f.configure(size=sz + 2)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
             # apply to some direct tk widgets
             try:
                 self.configure(bg=bg)
@@ -1145,14 +1376,15 @@ class OsuMP3Browser(tk.Tk):
             except Exception:
                 pass
             try:
-                # Ensure listbox interior matches theme fully (set options individually)
-                self.listbox.config(bg=list_bg)
-                self.listbox.config(fg=fg)
-                self.listbox.config(selectbackground=select_bg)
-                self.listbox.config(selectforeground=fg)
-                self.listbox.config(highlightbackground=bg)
-                self.listbox.config(highlightcolor=bg)
-                # skip insertbackground to avoid type-check complaints
+                # Ensure song_view interior matches theme
+                # Treeview uses styles; set tags or style as needed
+                style.configure('Treeview', background=list_bg, foreground=fg, fieldbackground=list_bg)
+                # Increase row height for bigger thumbnails
+                try:
+                    # Many ttk themes read rowheight from style layout; set it explicitly
+                    style.configure('Treeview', rowheight=max(44, getattr(self, '_thumb_size', (96,96))[1] + 10))
+                except Exception:
+                    pass
             except Exception:
                 pass
             try:
@@ -1188,6 +1420,102 @@ class OsuMP3Browser(tk.Tk):
         try:
             # save settings into cache immediately
             self._save_cache()
+        except Exception:
+            pass
+
+    def _generate_thumbnails_async(self):
+        """Build small thumbnails for visible items asynchronously to keep startup responsive."""
+        try:
+            if not (HAS_PIL and Image and ImageTk):
+                return
+            # Limit per-call work to avoid UI jank
+            batch = 20
+            built = 0
+            for path, title in self.mp3_paths:
+                if built >= batch:
+                    break
+                key = str(path)
+                # Skip if already cached
+                if hasattr(self, '_thumb_cache') and self._thumb_cache.get(key):
+                    # ensure disk has a copy if missing
+                    try:
+                        tp = self._thumb_path_for(path)
+                        if tp is not None and not tp.exists():
+                            # cannot reconstruct PhotoImage, so skip saving here
+                            pass
+                    except Exception:
+                        pass
+                    continue
+                # Find image source
+                bg = get_osu_background(path.parent)
+                if not bg:
+                    try:
+                        for p in sorted(path.parent.iterdir()):
+                            if p.suffix.lower() in {'.jpg', '.jpeg', '.png', '.bmp', '.gif'}:
+                                bg = p
+                                break
+                    except Exception:
+                        bg = None
+                if not bg:
+                    continue
+                # Create thumbnail
+                try:
+                    im = Image.open(bg)
+                    try:
+                        if im.mode in ('P', 'LA') or 'transparency' in getattr(im, 'info', {}):
+                            im = im.convert('RGBA')
+                    except Exception:
+                        pass
+                    resampling = getattr(Image, 'Resampling', None)
+                    resample = getattr(resampling, 'LANCZOS', None) if resampling is not None else getattr(Image, 'LANCZOS', None)
+                    size = getattr(self, '_thumb_size', (36, 36))
+                    if resample is not None:
+                        im.thumbnail(size, resample)
+                    else:
+                        im.thumbnail(size)
+                    base = Image.new('RGBA', size)
+                    try:
+                        x = (size[0] - im.width) // 2
+                        y = (size[1] - im.height) // 2
+                        if im.mode in ('RGBA', 'LA'):
+                            base.paste(im, (x, y), im)
+                        else:
+                            base.paste(im, (x, y))
+                    except Exception:
+                        base = im
+                    # Save to disk cache (best-effort)
+                    try:
+                        self._save_thumb_to_disk(path, base)
+                    except Exception:
+                        pass
+                    try:
+                        img_ref = ImageTk.PhotoImage(base, master=self.song_view)
+                    except Exception:
+                        img_ref = ImageTk.PhotoImage(base)
+                    if not hasattr(self, '_thumb_cache'):
+                        self._thumb_cache = {}
+                    self._thumb_cache[key] = img_ref
+                    # Update Treeview item image if iid is known
+                    try:
+                        iid = self._item_iids.get(key)
+                        if iid:
+                            self.song_view.item(iid, image=img_ref)
+                    except Exception:
+                        pass
+                    built += 1
+                except Exception:
+                    pass
+            # Schedule next batch if more items remain without thumbnails
+            try:
+                remaining = 0
+                if hasattr(self, '_thumb_cache'):
+                    for path, _ in self.mp3_paths:
+                        if not self._thumb_cache.get(str(path)):
+                            remaining += 1
+                if remaining > 0:
+                    self.after(400, self._generate_thumbnails_async)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -1379,9 +1707,73 @@ class OsuMP3Browser(tk.Tk):
                 # add to visible list
                 try:
                     self.mp3_paths.append((full, folder_title))
-                    self.listbox.insert(tk.END, folder_title)
+                    # insert into song_view with optional thumbnail
+                    img_ref = None
+                    if HAS_PIL and Image and ImageTk:
+                        if not hasattr(self, '_thumb_cache'):
+                            self._thumb_cache = {}
+                        key = str(full)
+                        img_ref = self._thumb_cache.get(key)
+                        if img_ref is None:
+                            # attempt load from disk cache
+                            try:
+                                img_ref = self._load_thumb_from_disk(full)
+                                if img_ref is not None:
+                                    self._thumb_cache[key] = img_ref
+                            except Exception:
+                                img_ref = None
+                        if img_ref is None:
+                            bg = get_osu_background(full.parent)
+                            if bg:
+                                im = Image.open(bg)
+                                try:
+                                    if im.mode in ('P', 'LA') or 'transparency' in getattr(im, 'info', {}):
+                                        im = im.convert('RGBA')
+                                except Exception:
+                                    pass
+                                resampling = getattr(Image, 'Resampling', None)
+                                resample = getattr(resampling, 'LANCZOS', None) if resampling is not None else getattr(Image, 'LANCZOS', None)
+                                size = getattr(self, '_thumb_size', (36, 36))
+                                if resample is not None:
+                                    im.thumbnail(size, resample)
+                                else:
+                                    im.thumbnail(size)
+                                base = Image.new('RGBA', size)
+                                try:
+                                    x = (size[0] - im.width) // 2
+                                    y = (size[1] - im.height) // 2
+                                    if im.mode in ('RGBA', 'LA'):
+                                        base.paste(im, (x, y), im)
+                                    else:
+                                        base.paste(im, (x, y))
+                                except Exception:
+                                    base = im
+                                # Save to disk cache best-effort
+                                try:
+                                    self._save_thumb_to_disk(full, base)
+                                except Exception:
+                                    pass
+                                try:
+                                    img_ref = ImageTk.PhotoImage(base, master=self.song_view)
+                                except Exception:
+                                    img_ref = ImageTk.PhotoImage(base)
+                                self._thumb_cache[key] = img_ref
+                    iid = None
+                    if img_ref is not None:
+                        iid = self.song_view.insert('', 'end', text=folder_title, image=img_ref)
+                    else:
+                        icon = getattr(self, '_default_item_icon', None)
+                        if icon is not None:
+                            iid = self.song_view.insert('', 'end', text=folder_title, image=icon)
+                        else:
+                            iid = self.song_view.insert('', 'end', text=folder_title)
+                    self._item_iids[str(full)] = iid
                 except Exception:
-                    pass
+                    try:
+                        iid = self.song_view.insert('', 'end', text=folder_title)
+                        self._item_iids[str(full)] = iid
+                    except Exception:
+                        pass
 
             # update status label with running count
             try:
@@ -1405,13 +1797,21 @@ class OsuMP3Browser(tk.Tk):
         # Perform file discovery and metadata retrieval on background thread,
         # but apply UI updates on the main thread to avoid tkinter thread-safety issues.
         try:
+            if getattr(self, '_debug_thumbnails', False):
+                try:
+                    print(f"[thumb] scan_and_populate start dir={self.songs_dir}", flush=True)
+                except Exception:
+                    pass
             if not self.songs_dir.exists():
                 # schedule UI update to show not found
-                self.after(0, lambda: self.listbox.insert(tk.END, "(Songs directory not found)"))
+                self.after(0, lambda: self.song_view.insert('', 'end', text="(Songs directory not found)"))
                 return
         except Exception as e:
-            print(f"Error checking songs_dir: {e}")
-            self.after(0, lambda: self.listbox.insert(tk.END, "(Songs directory error)"))
+            try:
+                print(f"Error checking songs_dir: {e}", flush=True)
+            except Exception:
+                pass
+            self.after(0, lambda: self.song_view.insert('', 'end', text="(Songs directory error)"))
             return
 
         # indicate scanning but do not clear the currently-displayed list;
@@ -1520,15 +1920,18 @@ class OsuMP3Browser(tk.Tk):
 
     def play_selected(self):
         # Prefer main list selection; fallback to playlist track selection
-        idx = self.listbox.curselection()
-        if idx:
-            index = idx[0]
-            try:
-                path = self.mp3_paths[index][0]
-            except IndexError:
+        try:
+            sel = self.song_view.selection()
+            if sel:
+                index = int(self.song_view.index(sel[0]))
+                try:
+                    path = self.mp3_paths[index][0]
+                except Exception:
+                    return
+                self._play_path(path)
                 return
-            self._play_path(path)
-            return
+        except Exception:
+            pass
         try:
             tr_sel = self.playlist_tracks_listbox.curselection()
         except Exception:
@@ -1542,13 +1945,14 @@ class OsuMP3Browser(tk.Tk):
 
     def on_double_click(self, event):
         # On double-click, always play from the main list selection
-        idx = self.listbox.curselection()
-        if not idx:
-            return
-        index = idx[0]
         try:
+            sel = self.song_view.selection()
+            if not sel:
+                return
+            item_id = sel[0]
+            index = int(self.song_view.index(item_id))
             path = self.mp3_paths[index][0]
-        except IndexError:
+        except Exception:
             return
         self._play_path(path)
 
@@ -1620,7 +2024,10 @@ class OsuMP3Browser(tk.Tk):
                         base.paste(img, (x, y))
                     except Exception:
                         base = img
-                    photo = ImageTk.PhotoImage(base)
+                    try:
+                        photo = ImageTk.PhotoImage(base, master=self)
+                    except Exception:
+                        photo = ImageTk.PhotoImage(base)
                     self.now_image_label.config(image=photo)
                     setattr(self.now_image_label, '_photo_ref', photo)
                 except Exception:
@@ -1796,16 +2203,33 @@ class OsuMP3Browser(tk.Tk):
             pass
 
     def _on_track_end(self, force_next: bool = False):
-        """Called when the current track finishes playing. Decide whether to loop or play next.
-        If force_next is True (e.g., Skip pressed), bypass loop mode and advance.
-        """
+        # Handle end-of-track: loop current, shuffle next, or play sequential next.
+        # If force_next is True (e.g., Skip pressed), bypass loop mode and advance.
         try:
-            # if loop enabled, restart same track
-            if self.play_mode == 'loop' and self._playing_path and not force_next:
+            # loop current track if mode is loop and not forced to advance
+            if self.play_mode == 'loop' and not force_next:
                 try:
                     audio.restart_playback(str(self._playing_path))
                 except Exception:
                     pass
+                # reset manual timing
+                try:
+                    self._start_time = time.time()
+                except Exception:
+                    self._start_time = None
+                self._pause_time = None
+                self._paused_offset = 0.0
+                # continue progress polling
+                try:
+                    if self._progress_after_id:
+                        try:
+                            self.after_cancel(self._progress_after_id)
+                        except Exception:
+                            pass
+                    self._progress_after_id = self.after(500, self.update_progress)
+                except Exception:
+                    pass
+                return
                 try:
                     self._start_time = time.time()
                 except Exception:
@@ -1844,9 +2268,9 @@ class OsuMP3Browser(tk.Tk):
                             for i, (p, t) in enumerate(self.mp3_paths):
                                 if p == next_path:
                                     try:
-                                        self.listbox.selection_clear(0, tk.END)
-                                        self.listbox.selection_set(i)
-                                        self.listbox.see(i)
+                                        item = self.song_view.get_children('')[i]
+                                        self.song_view.selection_set(item)
+                                        self.song_view.see(item)
                                     except Exception:
                                         pass
                                     break
@@ -1874,9 +2298,9 @@ class OsuMP3Browser(tk.Tk):
                 # select and play next
                 next_path = self.mp3_paths[next_index][0]
                 try:
-                    self.listbox.selection_clear(0, tk.END)
-                    self.listbox.selection_set(next_index)
-                    self.listbox.see(next_index)
+                    item = self.song_view.get_children('')[next_index]
+                    self.song_view.selection_set(item)
+                    self.song_view.see(item)
                     self._play_path(next_path)
                 except Exception:
                     pass
@@ -1899,7 +2323,7 @@ class OsuMP3Browser(tk.Tk):
             pass
 
     def on_volume_change(self, val):
-        """Callback for volume scale. `val` is a string from the scale command."""
+        # Volume scale callback; `val` is a string from the scale command.
         try:
             v = float(val)
         except Exception:
@@ -1915,13 +2339,14 @@ class OsuMP3Browser(tk.Tk):
             pass
 
     def on_select(self, event):
-        sel = self.listbox.curselection()
-        if not sel:
-            return
-        idx = sel[0]
         try:
+            sel = self.song_view.selection()
+            if not sel:
+                return
+            item_id = sel[0]
+            idx = int(self.song_view.index(item_id))
             path = self.mp3_paths[idx][0]
-        except IndexError:
+        except Exception:
             return
         meta = self._metadata.get(str(path), {})
         # display song name based on folder name
@@ -1973,7 +2398,10 @@ class OsuMP3Browser(tk.Tk):
                     base.paste(img, (x, y))
                 except Exception:
                     base = img
-                photo = ImageTk.PhotoImage(base)
+                try:
+                    photo = ImageTk.PhotoImage(base, master=self)
+                except Exception:
+                    photo = ImageTk.PhotoImage(base)
                 self.meta_image_label.config(image=photo)
                 setattr(self.meta_image_label, '_photo_ref', photo)
             except Exception:
@@ -1990,7 +2418,7 @@ class OsuMP3Browser(tk.Tk):
                 setattr(self.meta_image_label, '_photo_ref', placeholder)
 
     def _update_meta_display(self, path: Path):
-        """Update the right-side metadata panel (title/artist/album/duration/path/image) for `path`."""
+        # Update metadata panel (title/artist/album/duration/path/image) for the given path.
         try:
             meta = self._metadata.get(str(path), {})
             # display song name based on folder name
@@ -2043,7 +2471,10 @@ class OsuMP3Browser(tk.Tk):
                         base.paste(img, (x, y))
                     except Exception:
                         base = img
-                    photo = ImageTk.PhotoImage(base)
+                    try:
+                        photo = ImageTk.PhotoImage(base, master=self)
+                    except Exception:
+                        photo = ImageTk.PhotoImage(base)
                     self.meta_image_label.config(image=photo)
                     setattr(self.meta_image_label, '_photo_ref', photo)
                 except Exception:
@@ -2063,15 +2494,23 @@ class OsuMP3Browser(tk.Tk):
             pass
 
     def _on_listbox_motion(self, event):
-        """Schedule showing a tooltip near the mouse with the full list item text after a short delay."""
+        # Show a tooltip near the mouse with the full list item text after a short delay.
         try:
-            lb = event.widget
-            idx = lb.nearest(event.y)
-            if idx is None:
+            # Skip work during active scrolling
+            if time.time() < getattr(self, '_suppress_tooltips_until', 0.0):
+                return
+            tv = event.widget
+            iid = tv.identify_row(event.y)
+            if not iid:
                 self._hide_title_tooltip()
                 return
             try:
-                text = lb.get(idx)
+                idx = int(tv.index(iid))
+            except Exception:
+                self._hide_title_tooltip()
+                return
+            try:
+                text = self.mp3_paths[idx][1] if 0 <= idx < len(self.mp3_paths) else ''
             except Exception:
                 text = ''
             if not text:
@@ -2108,6 +2547,19 @@ class OsuMP3Browser(tk.Tk):
         except Exception:
             pass
 
+    def _on_mouse_wheel(self, event=None):
+        try:
+            # Suppress tooltip scheduling briefly after scroll to avoid lag
+            self._suppress_tooltips_until = time.time() + 0.3
+            # Also cancel any pending tooltip
+            try:
+                if self._tooltip_after_id:
+                    self.after_cancel(self._tooltip_after_id)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def _hide_title_tooltip(self, event=None):
         try:
             if self._title_tooltip:
@@ -2130,7 +2582,7 @@ class OsuMP3Browser(tk.Tk):
             pass
 
     def _on_meta_path_enter(self, event=None):
-        """Show full path in a tooltip when hovering the Path label."""
+        # Show full path in a tooltip when hovering the Path label.
         try:
             full = getattr(self, '_meta_path_full', '')
             if not full:
@@ -2151,7 +2603,7 @@ class OsuMP3Browser(tk.Tk):
             pass
 
     def _show_title_tooltip(self, x, y, text, idx):
-        """Create and show the tooltip immediately at x,y with given text."""
+        # Create and show the tooltip immediately at x,y with given text.
         try:
             # clear any previous tooltip
             try:
@@ -2188,7 +2640,7 @@ class OsuMP3Browser(tk.Tk):
         self.refresh_list()
 
     def update_progress(self):
-        """Poll playback position and update the progress bar and time label."""
+        # Poll playback position and update the progress bar and time label.
         try:
             path = self._playing_path
             if not path or not audio.is_audio_initialized():
@@ -2259,11 +2711,15 @@ class OsuMP3Browser(tk.Tk):
             self._progress_after_id = None
 
     def refresh_list(self):
-        """Refresh visible listbox entries based on `self.search_var`.
-        Matches against folder title, cached tag title, and artist (case-insensitive substring).
-        """
+        # Refresh visible entries based on `self.search_var`.
+        # Matches folder title, cached tag title, and artist (case-insensitive substring).
         q = (self.search_var.get() or '').strip().lower()
-        self.listbox.delete(0, tk.END)
+        # Clear treeview
+        try:
+            for iid in self.song_view.get_children(''):
+                self.song_view.delete(iid)
+        except Exception:
+            pass
         self.mp3_paths.clear()
         for path, folder_title in self.all_mp3_paths:
             # gather searchable strings
@@ -2281,10 +2737,122 @@ class OsuMP3Browser(tk.Tk):
 
             if match:
                 self.mp3_paths.append((path, folder_title))
-                self.listbox.insert(tk.END, folder_title)
+                # Create or reuse a small thumbnail image for this path
+                img_ref = None
+                try:
+                    if HAS_PIL and Image and ImageTk:
+                        if not hasattr(self, '_thumb_cache'):
+                            self._thumb_cache = {}
+                        key = str(path)
+                        img_ref = self._thumb_cache.get(key)
+                        if img_ref is None:
+                            # try disk cache first
+                            try:
+                                img_ref = self._load_thumb_from_disk(path)
+                                if img_ref is not None:
+                                    self._thumb_cache[key] = img_ref
+                            except Exception:
+                                img_ref = None
+                        if img_ref is None:
+                            # Try to find background via .osu; if missing, pick first image file in folder
+                            bg = get_osu_background(path.parent)
+                            if getattr(self, '_debug_thumbnails', False):
+                                try:
+                                    print(f"[thumb] folder={path.parent} osu_bg={bg}", flush=True)
+                                except Exception:
+                                    pass
+                            if not bg:
+                                try:
+                                    for p in sorted(path.parent.iterdir()):
+                                        if p.suffix.lower() in {'.jpg', '.jpeg', '.png', '.bmp', '.gif'}:
+                                            bg = p
+                                            break
+                                except Exception:
+                                    bg = None
+                                if getattr(self, '_debug_thumbnails', False):
+                                    try:
+                                        print(f"[thumb] fallback_img={bg}", flush=True)
+                                    except Exception:
+                                        pass
+                                # Print explicit no-image info on startup for first N items
+                                if bg is None and getattr(self, '_debug_thumbnails', False) and self._debug_thumb_print_count < self._debug_thumb_print_limit:
+                                    try:
+                                        print(f"[thumb-path] no-image for {path.parent}", flush=True)
+                                        self._debug_thumb_print_count += 1
+                                    except Exception:
+                                        pass
+                            if bg:
+                                if getattr(self, '_debug_thumbnails', False) and self._debug_thumb_print_count < self._debug_thumb_print_limit:
+                                    try:
+                                        print(f"[thumb-path] using={bg}", flush=True)
+                                        self._debug_thumb_print_count += 1
+                                    except Exception:
+                                        pass
+                                try:
+                                    im = Image.open(bg)
+                                except Exception as e:
+                                    if getattr(self, '_debug_thumbnails', False):
+                                        try:
+                                            print(f"[thumb] Image.open failed: {e}", flush=True)
+                                        except Exception:
+                                            pass
+                                    im = None
+                                resampling = getattr(Image, 'Resampling', None)
+                                resample = getattr(resampling, 'LANCZOS', None) if resampling is not None else getattr(Image, 'LANCZOS', None)
+                                size = getattr(self, '_thumb_size', (36, 36))
+                                if im is not None:
+                                    try:
+                                        if resample is not None:
+                                            im.thumbnail(size, resample)
+                                        else:
+                                            im.thumbnail(size)
+                                    except Exception as e:
+                                        if getattr(self, '_debug_thumbnails', False):
+                                            try:
+                                                print(f"[thumb] thumbnail failed: {e}", flush=True)
+                                            except Exception:
+                                                pass
+                                # paste onto fixed-size square to avoid jiggle
+                                base = Image.new('RGB', size)
+                                try:
+                                    if im is not None:
+                                        x = (size[0] - im.width) // 2
+                                        y = (size[1] - im.height) // 2
+                                        base.paste(im, (x, y))
+                                except Exception:
+                                    base = im
+                                # Save to disk cache best-effort
+                                try:
+                                    self._save_thumb_to_disk(path, base)
+                                except Exception:
+                                    pass
+                                try:
+                                    img_ref = ImageTk.PhotoImage(base, master=self.song_view)
+                                except Exception:
+                                    img_ref = ImageTk.PhotoImage(base)
+                                self._thumb_cache[key] = img_ref
+                                if getattr(self, '_debug_thumbnails', False):
+                                    try:
+                                        size_repr = getattr(base, 'size', None)
+                                        print(f"[thumb] cached key={key} size={size_repr} has_img={img_ref is not None}", flush=True)
+                                    except Exception:
+                                        pass
+                except Exception:
+                    img_ref = None
+                try:
+                    if img_ref is not None:
+                        self.song_view.insert('', 'end', text=folder_title, image=img_ref)
+                    else:
+                        self.song_view.insert('', 'end', text=folder_title)
+                except Exception:
+                    icon = getattr(self, '_default_item_icon', None)
+                    if icon is not None:
+                        self.song_view.insert('', 'end', text=folder_title, image=icon)
+                    else:
+                        self.song_view.insert('', 'end', text=folder_title)
 
     def on_progress_click(self, event):
-        """Handle click/drag on the progress bar to seek."""
+        # Handle click/drag on the progress bar to seek.
         try:
             widget = event.widget
             w = widget.winfo_width()
@@ -2304,7 +2872,7 @@ class OsuMP3Browser(tk.Tk):
             pass
 
     def seek_to(self, pos_sec: float):
-        """Seek to pos_sec (seconds) in the currently playing file."""
+        # Seek to pos_sec (seconds) in the currently playing file.
         if not self._playing_path:
             return
         # clamp
