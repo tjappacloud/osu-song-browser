@@ -58,56 +58,6 @@ A fast, thumbnail-rich browser for your osu! `Songs` folder. Play tracks, manage
 - Audio playback via `pygame`; UI built with `tkinter`/`ttk` and images via Pillow.
 - Metadata combines ID3 tags with folder-name parsing when tags are missing.
 - If you want to regenerate thumbnails at a new size, use Actions → Clear Thumbs.
-# osu! Song Browser
-
-A desktop application for browsing and playing audio files from your osu! Songs directory with a feature-rich GUI.
-
-## Features
-
-- **Automatic Song Discovery**: Scans your osu! Songs directory and lists all audio files
-- **Smart Metadata Display**: Extracts song information from MP3 tags or folder names
-- **Background Thumbnails**: Displays osu! beatmap background images
-- **Playback Controls**: Play, pause, stop, seek, and volume control
-- **Play Modes**: Sequential, loop current track, or shuffle across entire library
-- **Search & Filter**: Real-time search across song titles, artists, and albums
-- **Minimum Duration Filter**: Configurable cutoff to exclude short audio files
-- **Dark Mode**: Toggle between light and dark themes
-- **Persistent Cache**: Fast startup by caching song metadata
-- **Progress Bar**: Visual playback progress with click-to-seek functionality
-
-## Requirements
-
-- Python 3.8+
-- pygame
-- mutagen (optional, for better metadata extraction)
-- pillow (optional, for background images)
-
-## Installation
-
-1. Clone or download this repository
-2. Install dependencies:
-
-```bash
-pip install pygame mutagen pillow
-```
-
-## Project Structure
-
-```
-music_player/
-├── osu_mp3_browser/          # Main package
-│   ├── __init__.py           # Package initialization
-│   ├── config.py             # Configuration and constants
-│   ├── utils.py              # Utility functions
-│   ├── metadata.py           # Audio metadata extraction
-│   ├── audio.py              # Audio playback wrapper
-│   └── ui.py                 # GUI implementation
-├── main.py                   # Application entry point
-├── osutifylogo.ico
-├── requirements.txt
-├── .gitignore
-└── README.md
-```
 
 ## Controls
 
@@ -154,6 +104,24 @@ Song metadata is cached at:
 ```
 
 This speeds up subsequent launches by avoiding re-scanning all files.
+
+## Project Structure
+
+```
+music_player/
+├── osu_mp3_browser/          # Main package
+│   ├── __init__.py           # Package initialization
+│   ├── config.py             # Configuration and constants
+│   ├── utils.py              # Utility functions
+│   ├── metadata.py           # Audio metadata extraction
+│   ├── audio.py              # Audio playback wrapper
+│   └── ui.py                 # GUI implementation
+├── main.py                   # Application entry point
+├── osutifylogo.ico
+├── requirements.txt
+├── .gitignore
+└── README.md
+```
 
 ## Keyboard Shortcuts
 
