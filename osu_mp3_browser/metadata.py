@@ -77,35 +77,51 @@ def get_mp3_metadata(path: Path) -> dict:
 def get_osu_background(folder: Path) -> Path | None:
     """Find the first .osu file in folder and parse its [Events] section for a background image.
     Returns the resolved Path to the image if found and exists, otherwise None.
+
+    Notes:
+    - Ignores Video events and only returns image files referenced by background events.
+    - Supports common image extensions: .jpg, .jpeg, .png, .bmp, .gif.
     """
     try:
         # find first .osu file
+        osu_path = None
         for p in sorted(folder.iterdir()):
             if p.suffix.lower() == '.osu':
                 osu_path = p
                 break
-        else:
+        if osu_path is None:
             return None
+
+        image_exts = {'.jpg', '.jpeg', '.png', '.bmp', '.gif'}
 
         with osu_path.open('r', encoding='utf-8', errors='ignore') as f:
             in_events = False
             for line in f:
                 stripped = line.strip()
+                if not stripped:
+                    continue
                 if stripped.startswith('[Events]'):
                     in_events = True
                     continue
                 if in_events:
+                    # End of events section
                     if stripped.startswith('['):
                         break
-                    # line format: 0,0,"background.jpg",0,0
-                    if stripped.startswith('0,') or stripped.startswith('Video,'):
-                        parts = stripped.split(',')
-                        if len(parts) >= 3:
-                            img_part = parts[2].strip().strip('"')
-                            if img_part:
-                                bg_path = folder / img_part
-                                if bg_path.exists():
-                                    return bg_path
+                    # Skip video lines explicitly
+                    if stripped.startswith('Video,'):
+                        continue
+                    # Typical background line formats in [Events]:
+                    # 0,0,"bg.jpg",0,0
+                    # Background and Video event types can vary, we only accept images
+                    parts = [p.strip() for p in stripped.split(',')]
+                    if len(parts) >= 3:
+                        candidate = parts[2].strip().strip('"')
+                        if candidate:
+                            # Normalize path separators and remove leading/trailing spaces/quotes
+                            candidate_path = folder / candidate
+                            # If not exists with relative path, try resolving from .osu parent folder anyway
+                            if candidate_path.exists() and candidate_path.suffix.lower() in image_exts:
+                                return candidate_path
             return None
     except Exception:
         return None

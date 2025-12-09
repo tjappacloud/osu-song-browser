@@ -96,6 +96,7 @@ class OsuMP3Browser(tk.Tk):
             actions_menu = tk.Menu(actions_mb, tearoff=0)
             actions_menu.add_command(label="Browse...", command=self.browse_folder)
             actions_menu.add_command(label="Scan Now", command=lambda: threading.Thread(target=self.scan_and_populate, daemon=True).start())
+            actions_menu.add_command(label="Clear & Refresh Cache", command=self.clear_and_refresh_cache)
             actions_menu.add_separator()
             actions_menu.add_command(label="Clear Thumbs", command=self._clear_thumbnail_cache)
             actions_menu.add_command(label="Stats", command=self._open_stats_page)
@@ -1100,6 +1101,49 @@ class OsuMP3Browser(tk.Tk):
         except Exception:
             pass
 
+    def clear_and_refresh_cache(self):
+        """Clear the current song metadata cache and refresh the list by re-scanning."""
+        try:
+            # Remove cache file if it exists
+            try:
+                if getattr(self, 'cache_path', None) and self.cache_path.exists():
+                    try:
+                        # Python 3.8+: missing_ok supported
+                        self.cache_path.unlink(missing_ok=True)
+                    except TypeError:
+                        # Fallback for older versions
+                        self.cache_path.unlink()
+            except Exception:
+                pass
+
+            # Reset in-memory structures
+            try:
+                self._metadata.clear()
+            except Exception:
+                pass
+            try:
+                self._seen_paths.clear()
+            except Exception:
+                pass
+            try:
+                self.all_mp3_paths.clear()
+                self.mp3_paths.clear()
+            except Exception:
+                pass
+
+            # Update UI to reflect clearing
+            try:
+                for iid in self.song_view.get_children(''):
+                    self.song_view.delete(iid)
+                self.current_label.config(text="Cache cleared. Scanning...")
+            except Exception:
+                pass
+
+            # Trigger a fresh scan
+            threading.Thread(target=self.scan_and_populate, daemon=True).start()
+        except Exception:
+            pass
+
     def _apply_cache_to_ui(self):
         """Populate the visible list from the loaded cache quickly (main thread)."""
         try:
@@ -1870,6 +1914,13 @@ class OsuMP3Browser(tk.Tk):
         # Process each folder and pick only the first supported audio file in it
         for root, dirs, files in sorted(os_walk(self.songs_dir)):
             try:
+                # Skip duplicate map folders that end with (1) or (2)
+                try:
+                    folder_name = Path(root).name
+                    if folder_name.endswith('(1)') or folder_name.endswith('(2)'):
+                        continue
+                except Exception:
+                    pass
                 # find the first filename in sorted order that matches supported extensions
                 first_fn = None
                 for fn in sorted(files):
