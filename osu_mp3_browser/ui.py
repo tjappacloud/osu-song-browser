@@ -1329,10 +1329,6 @@ class OsuMP3Browser(tk.Tk):
                                     webbrowser.open(html_url)
                                 except Exception:
                                     pass
-                                try:
-                                    tw.destroy()
-                                except Exception:
-                                    pass
 
                             def install_now():
                                 try:
