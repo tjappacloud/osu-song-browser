@@ -3,7 +3,6 @@
 import re
 import os
 
-
 def strip_leading_numbers(s: str) -> str:
     """Remove leading numeric IDs and separators (e.g. '311328 Foo' -> 'Foo')."""
     if not s:
@@ -48,3 +47,4 @@ def os_walk(path):
     """Simple wrapper for os.walk so we can mock/test easily."""
     for root, dirs, files in os.walk(path):
         yield root, dirs, files
+

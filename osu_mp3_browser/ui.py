@@ -1287,6 +1287,20 @@ class OsuMP3Browser(tk.Tk):
             info = _json.loads(data.decode('utf-8'))
             latest_tag = str(info.get('tag_name') or info.get('name') or '').strip()
             html_url = str(info.get('html_url') or f"https://github.com/{self.GITHUB_REPO}/releases")
+            # Try to discover an installer asset (.exe) from the latest release assets
+            assets = info.get('assets') or []
+            installer_url = None
+            installer_name = None
+            for a in assets:
+                try:
+                    name = str(a.get('name') or '')
+                    url_dl = str(a.get('browser_download_url') or '')
+                    if name.lower().endswith('.exe') or url_dl.lower().endswith('.exe'):
+                        installer_url = url_dl
+                        installer_name = name
+                        break
+                except Exception:
+                    continue
             print(f"Latest version: {latest_tag}", flush=True)
             print(f"Current version: {self.APP_VERSION}", flush=True)
             if latest_tag:
@@ -1300,10 +1314,78 @@ class OsuMP3Browser(tk.Tk):
                     # Notify on main thread
                     def _notify():
                         try:
-                            messagebox.showinfo(
-                                "Update Available",
-                                f"A new version {latest_tag} is available.\nCurrent version: {self.APP_VERSION}\n\nOpen releases page: {html_url}"
-                            )
+                            # Create a simple popup with buttons: Install Now, Open Release Page, Later
+                            tw = tk.Toplevel(self)
+                            tw.title("Update Available")
+                            tw.resizable(False, False)
+                            lbl = ttk.Label(tw, text=f"A new version {latest_tag} is available.\nCurrent version: {self.APP_VERSION}")
+                            lbl.pack(padx=12, pady=(12, 6))
+                            btn_frame = ttk.Frame(tw)
+                            btn_frame.pack(padx=12, pady=(6, 12))
+
+                            def open_releases():
+                                try:
+                                    import webbrowser
+                                    webbrowser.open(html_url)
+                                except Exception:
+                                    pass
+                                try:
+                                    tw.destroy()
+                                except Exception:
+                                    pass
+
+                            def install_now():
+                                try:
+                                    if not installer_url:
+                                        # Fallback to releases page
+                                        open_releases()
+                                        return
+                                    # Download installer to temp and execute
+                                    import tempfile, os, urllib.request
+                                    tmpdir = tempfile.gettempdir()
+                                    fname = installer_name or installer_url.split('/')[-1] or 'setup.exe'
+                                    dest = os.path.join(tmpdir, fname)
+                                    # Show minimal progress state
+                                    try:
+                                        lbl.config(text=f"Downloading {fname}...")
+                                    except Exception:
+                                        pass
+                                    try:
+                                        with urllib.request.urlopen(installer_url, timeout=30) as r, open(dest, 'wb') as f:
+                                            CHUNK = 1024 * 64
+                                            while True:
+                                                b = r.read(CHUNK)
+                                                if not b:
+                                                    break
+                                                f.write(b)
+                                    except Exception as e:
+                                        messagebox.showerror("Download failed", f"Could not download installer:\n{e}\n\nReleases: {html_url}")
+                                        return
+                                    # Launch installer
+                                    try:
+                                        os.startfile(dest)
+                                    except Exception:
+                                        try:
+                                            import subprocess
+                                            subprocess.Popen([dest], shell=True)
+                                        except Exception:
+                                            messagebox.showerror("Launch failed", "Could not start installer.")
+                                            return
+                                    # Close popup and app to allow installer to proceed
+                                    try:
+                                        tw.destroy()
+                                    except Exception:
+                                        pass
+                                    try:
+                                        self.after(100, self.destroy)
+                                    except Exception:
+                                        pass
+                                except Exception:
+                                    pass
+
+                            ttk.Button(btn_frame, text="Install Now", command=install_now).pack(side=tk.LEFT, padx=6)
+                            ttk.Button(btn_frame, text="Open Release Page", command=open_releases).pack(side=tk.LEFT, padx=6)
+                            ttk.Button(btn_frame, text="Later", command=lambda: tw.destroy()).pack(side=tk.LEFT, padx=6)
                         except Exception:
                             pass
                     self.after(0, _notify)
