@@ -2,6 +2,8 @@
 
 A fast, thumbnail-rich browser for your osu! `Songs` folder. Play tracks, manage playlists, and view listening stats.
 
+![alt text](https://github.com/tjappacloud/osu-song-browser/blob/main/Screenshot%202025-12-05%20204134.png "example")
+
 ## Setup
 
 ### Method 1
