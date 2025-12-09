@@ -32,6 +32,9 @@ class OsuMP3Browser(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("osu! Song Browser")
+        # Application version used for update checks
+        self.APP_VERSION = "1.1.01"
+        self.GITHUB_REPO = "tjappacloud/osu-song-browser"
         width = self.winfo_screenwidth()
         height = self.winfo_screenheight()
         # Start maximized (zoomed) on Windows; fallback to fullscreen-sized window
@@ -393,6 +396,7 @@ class OsuMP3Browser(tk.Tk):
         # try to load existing cache so UI can populate faster (also loads theme)
         try:
             self._load_cache()
+            print("Loaded existing cache", flush=True)
             # apply theme from cache before showing UI
             try:
                 self.apply_theme()
@@ -404,6 +408,15 @@ class OsuMP3Browser(tk.Tk):
             except Exception:
                 pass
         except Exception:
+            print("No existing cache found", flush=True)
+            pass
+
+        # Background check for new releases (non-blocking)
+        try:
+            print("Scheduling update check...", flush=True)
+            self.after(1000, lambda: threading.Thread(target=self._check_for_updates, daemon=True).start())
+        except Exception:
+            print("Failed to schedule update check", flush=True)
             pass
 
         # --- Playlists UI ---
@@ -1252,6 +1265,50 @@ class OsuMP3Browser(tk.Tk):
             except Exception:
                 pass
         except Exception:
+            pass
+
+    def _version_tuple(self, v: str):
+        try:
+            return tuple(int(x) for x in (v.strip().lstrip('v').strip('test').split('.')))
+        except Exception:
+            return (0,)
+
+    def _check_for_updates(self):
+        """Fetch latest GitHub release and notify user if a newer version is available."""
+        try:
+            import urllib.request
+            import json as _json
+            print("Checking for updates...", flush=True)
+            url = f"https://api.github.com/repos/{self.GITHUB_REPO}/releases/latest"
+            req = urllib.request.Request(url, headers={"User-Agent": "osu-song-browser"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                print("Update check response received", flush=True)
+                data = resp.read()
+            info = _json.loads(data.decode('utf-8'))
+            latest_tag = str(info.get('tag_name') or info.get('name') or '').strip()
+            html_url = str(info.get('html_url') or f"https://github.com/{self.GITHUB_REPO}/releases")
+            print(f"Latest version: {latest_tag}", flush=True)
+            print(f"Current version: {self.APP_VERSION}", flush=True)
+            if latest_tag:
+                print("Comparing versions...", flush=True)
+                cur = self._version_tuple(self.APP_VERSION)
+                print(f"Current version tuple: {cur}", flush=True)
+                latest = self._version_tuple(latest_tag)
+                print(f"Latest version tuple: {latest}", flush=True)
+                if latest > cur:
+                    print("New version available!", flush=True)
+                    # Notify on main thread
+                    def _notify():
+                        try:
+                            messagebox.showinfo(
+                                "Update Available",
+                                f"A new version {latest_tag} is available.\nCurrent version: {self.APP_VERSION}\n\nOpen releases page: {html_url}"
+                            )
+                        except Exception:
+                            pass
+                    self.after(0, _notify)
+        except Exception:
+            # ignore network errors
             pass
 
     def _thumb_path_for(self, path: Path):
