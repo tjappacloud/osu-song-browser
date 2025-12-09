@@ -33,7 +33,7 @@ class OsuMP3Browser(tk.Tk):
         super().__init__()
         self.title("osu! Song Browser")
         # Application version used for update checks
-        self.APP_VERSION = "1.1.01"
+        self.APP_VERSION = "1.1.2"
         self.GITHUB_REPO = "tjappacloud/osu-song-browser"
         width = self.winfo_screenwidth()
         height = self.winfo_screenheight()
